@@ -29,43 +29,7 @@ static const struct rte_eth_conf port_conf_default = {
 
 static unsigned nb_ports;
 
-static struct {
-  uint64_t total_cycles;
-  uint64_t total_pkts;
-} latency_numbers;
-
-
-static uint16_t add_timestamps(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
-    struct rte_mbuf **pkts, uint16_t nb_pkts,
-    uint16_t max_pkts __rte_unused, void *_ __rte_unused)
-{
-  uint64_t now = rte_rdtsc();
-
-  for (unsigned i = 0; i < nb_pkts; i++)
-    pkts[i]->udata64 = now;
-  return nb_pkts;
-}
-
-static uint16_t calc_latency(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
-    struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
-{
-  uint64_t cycles = 0;
-  uint64_t now = rte_rdtsc();
-
-  for (unsigned i = 0; i < nb_pkts; i++)
-    cycles += now - pkts[i]->udata64;
-  latency_numbers.total_cycles += cycles;
-  latency_numbers.total_pkts += nb_pkts;
-
-  if (latency_numbers.total_pkts > (100 * 1000 * 1000ULL)) {
-    printf("Latency = %"PRIu64" cycles\n",
-    latency_numbers.total_cycles / latency_numbers.total_pkts);
-    latency_numbers.total_cycles = latency_numbers.total_pkts = 0;
-  }
-  return nb_pkts;
-}
-
-static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
+static int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
   struct rte_eth_conf port_conf = port_conf_default;
   const uint16_t rx_rings = 1, tx_rings = 1;
@@ -119,8 +83,6 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
       addr.addr_bytes[4], addr.addr_bytes[5]);
 
   rte_eth_promiscuous_enable(port);
-  rte_eth_add_rx_callback(port, 0, add_timestamps, NULL);
-  rte_eth_add_tx_callback(port, 0, calc_latency, NULL);
 
   return 0;
 }
@@ -129,9 +91,7 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 void send() {
   struct rte_mbuf *hdr;
 
-printf("size1 %d\n", rte_mempool_avail_count(my_pool));
   if (unlikely ((hdr = rte_pktmbuf_alloc(my_pool)) == NULL)) return;
-printf("size2 %d\n", rte_mempool_avail_count(my_pool));
 
   ether_hdr *eth_hdr = rte_pktmbuf_mtod(hdr, struct ether_hdr *);
   rte_eth_macaddr_get(0, &eth_hdr->s_addr);
@@ -164,10 +124,20 @@ printf("size2 %d\n", rte_mempool_avail_count(my_pool));
 
   rte_pktmbuf_free(hdr);
 }
-/*
- * Main thread that does the work, reading from INPUT_PORT
- * and writing to OUTPUT_PORT
- */
+
+void send_data(uint8_t *data, int len) {
+  struct rte_mbuf *hdr;
+  if (unlikely ((hdr = rte_pktmbuf_alloc(my_pool)) == NULL)) return;
+
+  hdr->data_len = len;
+  hdr->pkt_len = len;
+  uint8_t *odata = rte_pktmbuf_mtod(hdr, unsigned char *);
+  memcpy(odata, data, len);
+  rte_eth_tx_burst(0, 0, &hdr, 1);
+  rte_pktmbuf_free(hdr);
+}
+
+void eth_switch(uint8_t *data, int len);
 struct rte_mempool *mbuf_pool;
 static  __attribute__((noreturn)) void lcore_main(void)
 {
@@ -187,19 +157,19 @@ static  __attribute__((noreturn)) void lcore_main(void)
         continue;
 
       for (int buf_idx=0; buf_idx < nb_rx; buf_idx++) {
-printf("size3 %d\n", rte_mempool_avail_count(mbuf_pool));
-        printf("got packet %d\n", nb_rx);
+        //printf("got packet %d\n", nb_rx);
         unsigned char *b = rte_pktmbuf_mtod(bufs[buf_idx], unsigned char*);
         int len = rte_pktmbuf_pkt_len(bufs[buf_idx]);
+        eth_switch(b, len);
         for (int i=0; i<len; i++) {
           printf("%02x ", (unsigned char)b[i]);
         }
+        //printf("\n");
+        //for (int i=0; i<len; i++) {
+        //  if (b[i]>30) printf("%c", b[i]);
+        //}
         printf("\n");
-        for (int i=0; i<len; i++) {
-          if (b[i]>30) printf("%c", b[i]);
-        }
-        printf("\n");
-        if (b[5] != 0x4a) send();
+        //if (b[5] != 0x4a) send();
       }
 
         uint16_t buf;
@@ -210,22 +180,32 @@ printf("size3 %d\n", rte_mempool_avail_count(mbuf_pool));
   }
 }
 
-/* Main function, does initialisation and calls the per-lcore functions */
+static int slave_main(__attribute__((unused)) void *arg1) {
+  while (true) {
+  }
+}
+
+void start_slave() {
+  int master_core = rte_lcore_id();
+  int slave_core = rte_get_next_lcore(rte_lcore_id(), 1, 0);
+  printf("cores %d %d\n", master_core, slave_core);
+
+  rte_eal_remote_launch(slave_main, NULL, slave_core);
+}
+
 int main(int argc, char *argv[])
 {
-//  uint16_t portid;
 
-  /* init EAL */
   int ret = rte_eal_init(argc, argv);
   if (ret < 0) rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
   argc -= ret;
   argv += ret;
 
-  nb_ports = rte_eth_dev_count();
-  //if (nb_ports < 2 || (nb_ports & 1))
-  //  rte_exit(EXIT_FAILURE, "Error: number of ports must be even\n");
-  my_pool = rte_pktmbuf_pool_create("my_POOL", NUM_MBUFS * nb_ports , MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+  printf("total cores %d\n", rte_lcore_count());
 
+  nb_ports = rte_eth_dev_count();
+
+  my_pool = rte_pktmbuf_pool_create("my_POOL", NUM_MBUFS * nb_ports , MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
   mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS * nb_ports, MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
   if (mbuf_pool == NULL)
     rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
@@ -236,11 +216,8 @@ int main(int argc, char *argv[])
       rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8"\n",
           portid);
 
-  if (rte_lcore_count() > 1)
-    printf("\nWARNING: Too much enabled lcores - "
-      "App uses only 1 lcore\n");
 
-  /* call lcore_main on master core only */
+  start_slave();
   lcore_main();
   return 0;
 }

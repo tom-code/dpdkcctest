@@ -6,7 +6,7 @@ project (d1)
 set (DPDK_HOME /data/dpdk/dpdk-stable-18.02.1)
 
 
-set (SRC main.cc)
+set (SRC main.cc switch.cc arp.cc)
 
 
 include_directories(${DPDK_HOME}/x86_64-native-linuxapp-gcc/include)
